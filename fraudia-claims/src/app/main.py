@@ -11,6 +11,14 @@ import sys
 import io
 from datetime import datetime, date
 
+# ── page config (MUST be first Streamlit call) ─────────────────
+st.set_page_config(
+    page_title="AIS — Análisis Inteligente de Siniestros",
+    page_icon="🛡️",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
 # ── path setup ─────────────────────────────────────────────────
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 sys.path.insert(0, ROOT)
@@ -37,13 +45,6 @@ def init_supabase():
 
 supabase = init_supabase()
 
-# ── page config (MUST be first Streamlit call) ─────────────────
-st.set_page_config(
-    page_title="AIS — Análisis Inteligente de Siniestros",
-    page_icon="🛡️",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
 
 # ── demo data loader ───────────────────────────────────────────
 @st.cache_data(ttl=60, show_spinner=False)
