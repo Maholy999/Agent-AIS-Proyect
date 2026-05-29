@@ -1,0 +1,50 @@
+# Python virtual environment
+.venv/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Pytest
+.pytest_cache/
+
+# IDE / editor folders
+.vscode/
+.idea/
+
+# Environment variables
+.env
+.env.*
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Local data folders
+data/raw/
+data/processed/
+
+# Logs and runtime files
+*.log
+*.pid
+*.seed
+
+# MacOS
+.DS_Store
+
+# Windows
+Thumbs.db
+
+# Python coverage
+.coverage
+htmlcov/
+coverage.xml
+
+# VS Code workspace settings
+*.code-workspace
