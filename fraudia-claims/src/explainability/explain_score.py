@@ -5,13 +5,13 @@ Explicaciones inteligentes de scores de riesgo usando GPT-4o-mini.
 
 import os
 import json
-from functools import lru_cache
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 try:
     from dotenv import load_dotenv
-    _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-    load_dotenv(os.path.join(_ROOT, ".env"))
+    _ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+    load_dotenv(_ENV_PATH)
 except ImportError:
     pass
 
@@ -21,9 +21,12 @@ try:
 except ImportError:
     _OPENAI_AVAILABLE = False
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-# Modelo rápido para el chat del agente (gpt-5-nano es lento por tokens de razonamiento)
-OPENAI_MODEL_CHAT = os.getenv("OPENAI_MODEL_CHAT", "gpt-4o-mini")
+
+def _get_model(mode: str = "explain") -> str:
+    """Lee el modelo desde .env en cada llamada (evita valores obsoletos al importar)."""
+    if mode == "chat":
+        return os.getenv("OPENAI_MODEL_CHAT") or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    return os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 _VALID_ROLES = frozenset({"system", "user", "assistant"})
 
@@ -159,7 +162,6 @@ def _create_chat_completion(
     raise RuntimeError("No se pudo completar la llamada a OpenAI")
 
 
-@lru_cache(maxsize=1)
 def _get_client() -> Optional[Any]:
     if not _OPENAI_AVAILABLE:
         return None
@@ -216,9 +218,10 @@ Proporciona:
 3. Nivel de Prioridad y Sugerencia de Auditoría
 4. Factores clave que sustentan la decisión"""
 
+        model = _get_model("explain")
         response = _create_chat_completion(
             client,
-            OPENAI_MODEL,
+            model,
             [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
@@ -245,7 +248,7 @@ def responder_consulta(
     if client is None:
         return _respuesta_local(pregunta, contexto_datos)
 
-    model = OPENAI_MODEL_CHAT
+    model = _get_model("chat")
     system_content = CHAT_SYSTEM_PROMPT
     if contexto_datos:
         ctx = contexto_datos if len(contexto_datos) <= 6000 else contexto_datos[:6000] + "\n…[contexto recortado]"
