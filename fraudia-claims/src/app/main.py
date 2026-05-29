@@ -1436,6 +1436,7 @@ def render_chat_panel(data: list):
             if st.button(sug, key=f"sug_{i}", use_container_width=True):
                 st.session_state["chat_history"].append({"role": "user", "content": sug})
                 _send_chat(sug, data)
+                st.rerun()
 
     if st.session_state["chat_history"]:
         st.markdown('<div style="margin:12px 0 8px;border-top:1px solid rgba(99,102,241,0.15);padding-top:12px;"></div>', unsafe_allow_html=True)

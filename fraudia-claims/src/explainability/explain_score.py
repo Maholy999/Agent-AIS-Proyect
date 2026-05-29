@@ -9,6 +9,13 @@ from functools import lru_cache
 from typing import Dict, Any, List, Optional
 
 try:
+    from dotenv import load_dotenv
+    _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+    load_dotenv(os.path.join(_ROOT, ".env"))
+except ImportError:
+    pass
+
+try:
     from openai import OpenAI
     _OPENAI_AVAILABLE = True
 except ImportError:
@@ -18,11 +25,29 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 # Modelo rápido para el chat del agente (gpt-5-nano es lento por tokens de razonamiento)
 OPENAI_MODEL_CHAT = os.getenv("OPENAI_MODEL_CHAT", "gpt-4o-mini")
 
+_VALID_ROLES = frozenset({"system", "user", "assistant"})
+
+
+def _normalize_model_name(model: str) -> str:
+    return (model or "").lower().replace("_", "-").strip()
+
 
 def _uses_completion_tokens(model: str) -> bool:
-    """Modelos recientes (gpt-5, o-series) usan max_completion_tokens y no temperature."""
-    m = (model or "").lower()
-    return m.startswith(("gpt-5", "o1", "o3", "o4"))
+    """Modelos recientes (gpt-5, o-series, gpt-4.1+) usan max_completion_tokens y no temperature."""
+    m = _normalize_model_name(model)
+    if os.getenv("OPENAI_USE_MAX_COMPLETION_TOKENS", "").lower() in ("1", "true", "yes"):
+        return True
+    if "gpt-5" in m or "gpt5" in m:
+        return True
+    if m.startswith(("o1", "o3", "o4")) or m.startswith("o-"):
+        return True
+    if m.startswith(("gpt-4.1", "gpt-4.5")):
+        return True
+    return False
+
+
+def _supports_temperature(model: str) -> bool:
+    return not _uses_completion_tokens(model)
 
 
 def _completion_params(
@@ -31,12 +56,107 @@ def _completion_params(
     temperature: float = 0.3,
     *,
     mode: str = "chat",
+    use_completion_tokens: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    if _uses_completion_tokens(model):
-        # Mínimos probados: chat ~1200, explicación larga ~3000 (evitar 4000+)
+    use_new = _uses_completion_tokens(model) if use_completion_tokens is None else use_completion_tokens
+    if use_new:
+        # Mínimos probados: chat ~1200, explicación larga ~3000 (evitar error HTTP 400)
         floor = 3000 if mode == "explain" else 1200
         return {"max_completion_tokens": max(max_output, floor)}
-    return {"max_tokens": max_output, "temperature": temperature}
+    params: Dict[str, Any] = {"max_tokens": max_output}
+    if _supports_temperature(model):
+        params["temperature"] = temperature
+    return params
+
+
+def _alternate_completion_params(
+    model: str,
+    max_output: int,
+    temperature: float,
+    *,
+    mode: str = "chat",
+) -> Dict[str, Any]:
+    """Parámetros alternativos si la API rechaza el primer intento (error 400)."""
+    return _completion_params(
+        model,
+        max_output,
+        temperature,
+        mode=mode,
+        use_completion_tokens=not _uses_completion_tokens(model),
+    )
+
+
+def _sanitize_messages(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    clean: List[Dict[str, str]] = []
+    for msg in messages:
+        role = (msg.get("role") or "").strip().lower()
+        if role == "ai":
+            role = "assistant"
+        if role not in _VALID_ROLES:
+            continue
+        content = msg.get("content")
+        if content is None:
+            continue
+        text = str(content).strip()
+        if not text:
+            continue
+        clean.append({"role": role, "content": text})
+    return clean
+
+
+def _is_retriable_openai_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "400" in text
+        or "invalid_request" in text
+        or "unsupported" in text
+        or "max_tokens" in text
+        or "max_completion_tokens" in text
+        or "temperature" in text
+    )
+
+
+def _create_chat_completion(
+    client: Any,
+    model: str,
+    messages: List[Dict[str, str]],
+    max_output: int,
+    temperature: float = 0.3,
+    *,
+    mode: str = "chat",
+) -> Any:
+    """Llama a chat.completions con reintento automático ante parámetros incompatibles."""
+    safe_messages = _sanitize_messages(messages)
+    if not safe_messages:
+        raise ValueError("No hay mensajes válidos para enviar a la API")
+
+    param_sets = [
+        _completion_params(model, max_output, temperature, mode=mode),
+        _alternate_completion_params(model, max_output, temperature, mode=mode),
+    ]
+    seen = []
+    unique_params = []
+    for p in param_sets:
+        key = tuple(sorted(p.items()))
+        if key not in seen:
+            seen.append(key)
+            unique_params.append(p)
+
+    last_error: Optional[Exception] = None
+    for params in unique_params:
+        try:
+            return client.chat.completions.create(
+                model=model,
+                messages=safe_messages,
+                **params,
+            )
+        except Exception as exc:
+            last_error = exc
+            if not _is_retriable_openai_error(exc):
+                raise
+    if last_error:
+        raise last_error
+    raise RuntimeError("No se pudo completar la llamada a OpenAI")
 
 
 @lru_cache(maxsize=1)
@@ -91,25 +211,27 @@ def explicar_siniestro(
 {json.dumps(contexto, ensure_ascii=False, indent=2)}
 
 Proporciona:
-Proporciona:
 1. Conclusión General del Siniestro (Resumen ejecutivo y probabilidad de fraude)
 2. Impacto Potencial y Exposición Financiera
 3. Nivel de Prioridad y Sugerencia de Auditoría
 4. Factores clave que sustentan la decisión"""
 
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
+        response = _create_chat_completion(
+            client,
+            OPENAI_MODEL,
+            [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            **_completion_params(OPENAI_MODEL, 900, temperature=0.3, mode="explain"),
+            max_output=900,
+            temperature=0.3,
+            mode="explain",
         )
         content = response.choices[0].message.content
         return content if content else _explicacion_local(contexto)
 
     except Exception as e:
-        return _explicacion_local(contexto) + f"\n\n*(Modo local: {str(e)[:50]})*"
+        return _explicacion_local(contexto) + f"\n\n*(Modo local: {str(e)[:80]})*"
 
 
 def responder_consulta(
@@ -124,35 +246,29 @@ def responder_consulta(
         return _respuesta_local(pregunta, contexto_datos)
 
     model = OPENAI_MODEL_CHAT
-    mensajes = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
-
+    system_content = CHAT_SYSTEM_PROMPT
     if contexto_datos:
-        # Recortar contexto muy largo para reducir latencia
         ctx = contexto_datos if len(contexto_datos) <= 6000 else contexto_datos[:6000] + "\n…[contexto recortado]"
-        mensajes.append({
-            "role": "user",
-            "content": f"Contexto del portafolio:\n{ctx}"
-        })
-        mensajes.append({
-            "role": "assistant",
-            "content": "Entendido. ¿En qué puedo ayudarte?"
-        })
+        system_content += f"\n\n## Contexto del portafolio (datos actuales)\n{ctx}"
 
-    for msg in historial[-4:]:  # últimos 2 turnos
+    mensajes: List[Dict[str, str]] = [{"role": "system", "content": system_content}]
+    for msg in historial[-6:]:
         mensajes.append(msg)
-
-    mensajes.append({"role": "user", "content": pregunta})
+    mensajes.append({"role": "user", "content": pregunta.strip()})
 
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=mensajes,
-            **_completion_params(model, 450, temperature=0.4, mode="chat"),
+        response = _create_chat_completion(
+            client,
+            model,
+            mensajes,
+            max_output=450,
+            temperature=0.4,
+            mode="chat",
         )
         content = response.choices[0].message.content
         return content if content else _respuesta_local(pregunta, contexto_datos)
     except Exception as e:
-        return _respuesta_local(pregunta, contexto_datos) + f"\n\n*(Error API: {str(e)[:50]})*"
+        return _respuesta_local(pregunta, contexto_datos) + f"\n\n*(Error API: {str(e)[:120]})*"
 
 
 def _calcular_dias(siniestro: Dict) -> int:
@@ -186,7 +302,7 @@ def _explicacion_local(ctx: Dict) -> str:
         "",
         "**4. Factores clave que sustentan la decisión:**",
     ]
-    
+
     if alertas:
         for a in alertas:
             if isinstance(a, dict):
