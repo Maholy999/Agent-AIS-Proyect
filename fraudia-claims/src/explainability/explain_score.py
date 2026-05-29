@@ -5,8 +5,15 @@ Explicaciones inteligentes de scores de riesgo usando GPT-4o-mini.
 
 import os
 import json
-from functools import lru_cache
+from pathlib import Path
 from typing import Dict, Any, List, Optional
+
+try:
+    from dotenv import load_dotenv
+    _ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+    load_dotenv(_ENV_PATH)
+except ImportError:
+    pass
 
 try:
     from openai import OpenAI
@@ -14,9 +21,12 @@ try:
 except ImportError:
     _OPENAI_AVAILABLE = False
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-# Modelo rápido para el chat del agente (gpt-5-nano es lento por tokens de razonamiento)
-OPENAI_MODEL_CHAT = os.getenv("OPENAI_MODEL_CHAT", "gpt-4o-mini")
+
+def _get_model(mode: str = "explain") -> str:
+    """Lee el modelo desde .env en cada llamada (evita valores obsoletos al importar)."""
+    if mode == "chat":
+        return os.getenv("OPENAI_MODEL_CHAT") or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    return os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 
 def _uses_completion_tokens(model: str) -> bool:
@@ -25,21 +35,13 @@ def _uses_completion_tokens(model: str) -> bool:
     return m.startswith(("gpt-5", "o1", "o3", "o4"))
 
 
-def _completion_params(
-    model: str,
-    max_output: int,
-    temperature: float = 0.3,
-    *,
-    mode: str = "chat",
-) -> Dict[str, Any]:
+def _completion_params(model: str, max_output: int, temperature: float = 0.3) -> Dict[str, Any]:
     if _uses_completion_tokens(model):
-        # Mínimos probados: chat ~1200, explicación larga ~3000 (evitar 4000+)
-        floor = 3000 if mode == "explain" else 1200
+        floor = 2000 if max_output >= 600 else 1200
         return {"max_completion_tokens": max(max_output, floor)}
     return {"max_tokens": max_output, "temperature": temperature}
 
 
-@lru_cache(maxsize=1)
 def _get_client() -> Optional[Any]:
     if not _OPENAI_AVAILABLE:
         return None
@@ -54,9 +56,6 @@ Tu rol es ASISTIR al analista humano — jamás acusas de fraude directamente.
 Analizas indicadores de riesgo y generas explicaciones claras, profesionales y accionables.
 Responde siempre en español. Sé conciso pero completo.
 Usa bullet points cuando sea útil. Nunca menciones que eres una IA en tus análisis."""
-
-CHAT_SYSTEM_PROMPT = SYSTEM_PROMPT + """
-En el chat responde de forma breve (máximo 120 palabras) salvo que pidan un análisis detallado."""
 
 
 def explicar_siniestro(
@@ -91,19 +90,19 @@ def explicar_siniestro(
 {json.dumps(contexto, ensure_ascii=False, indent=2)}
 
 Proporciona:
-Proporciona:
 1. Conclusión General del Siniestro (Resumen ejecutivo y probabilidad de fraude)
 2. Impacto Potencial y Exposición Financiera
 3. Nivel de Prioridad y Sugerencia de Auditoría
 4. Factores clave que sustentan la decisión"""
 
+        model = _get_model("explain")
         response = client.chat.completions.create(
-            model=OPENAI_MODEL,
+            model=model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            **_completion_params(OPENAI_MODEL, 900, temperature=0.3, mode="explain"),
+            **_completion_params(model, 600, temperature=0.3),
         )
         content = response.choices[0].message.content
         return content if content else _explicacion_local(contexto)
@@ -123,31 +122,29 @@ def responder_consulta(
     if client is None:
         return _respuesta_local(pregunta, contexto_datos)
 
-    model = OPENAI_MODEL_CHAT
-    mensajes = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
+    mensajes = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     if contexto_datos:
-        # Recortar contexto muy largo para reducir latencia
-        ctx = contexto_datos if len(contexto_datos) <= 6000 else contexto_datos[:6000] + "\n…[contexto recortado]"
         mensajes.append({
             "role": "user",
-            "content": f"Contexto del portafolio:\n{ctx}"
+            "content": f"Contexto actual del sistema:\n{contexto_datos}"
         })
         mensajes.append({
             "role": "assistant",
-            "content": "Entendido. ¿En qué puedo ayudarte?"
+            "content": "Entendido. Tengo acceso al contexto del portafolio de siniestros. ¿En qué puedo ayudarte?"
         })
 
-    for msg in historial[-4:]:  # últimos 2 turnos
+    for msg in historial[-6:]:  # últimos 3 turnos
         mensajes.append(msg)
 
     mensajes.append({"role": "user", "content": pregunta})
 
     try:
+        model = _get_model("chat")
         response = client.chat.completions.create(
             model=model,
             messages=mensajes,
-            **_completion_params(model, 450, temperature=0.4, mode="chat"),
+            **_completion_params(model, 450, temperature=0.4),
         )
         content = response.choices[0].message.content
         return content if content else _respuesta_local(pregunta, contexto_datos)
